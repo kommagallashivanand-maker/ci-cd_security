@@ -1,0 +1,57 @@
+.status-badge {
+  display: inline-flex;
+
+  align-items: center;
+
+  justify-content: center;
+
+  padding: 6px 12px;
+
+  border-radius: var(--radius-pill);
+
+  font-size: var(--font-size-xs);
+
+  font-weight: var(--font-weight-semibold);
+
+  color: var(--color-surface);
+
+  text-transform: capitalize;
+
+  white-space: nowrap;
+}
+
+/* Primary */
+
+.status-badge--primary {
+  background: var(--color-primary);
+}
+
+/* Success */
+
+.status-badge--success {
+  background: var(--color-success);
+}
+
+/* Warning */
+
+.status-badge--warning {
+  background: var(--color-warning);
+}
+
+/* Danger */
+
+.status-badge--danger {
+  background: var(--color-danger);
+}
+
+/* Info */
+
+.status-badge--info {
+  background: var(--color-info);
+}
+
+/* Secondary */
+
+.status-badge--secondary {
+  background: var(--color-secondary);
+}

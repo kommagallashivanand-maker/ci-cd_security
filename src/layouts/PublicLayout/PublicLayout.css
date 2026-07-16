@@ -1,0 +1,26 @@
+.public-layout {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  min-height: 100vh;
+
+  padding: var(--space-xl);
+
+  background-color: var(--color-background);
+}
+
+.public-layout__content {
+  width: 100%;
+  max-width: 480px;
+
+  padding: var(--space-xxl);
+
+  background-color: var(--color-surface);
+
+  border: 1px solid var(--color-border);
+
+  border-radius: var(--radius-lg);
+
+  box-shadow: var(--shadow-md);
+}

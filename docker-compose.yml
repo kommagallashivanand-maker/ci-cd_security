@@ -1,0 +1,5 @@
+services:
+  deskflow:
+    build: .
+    ports:
+      - "5173:80"

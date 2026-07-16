@@ -1,0 +1,15 @@
+.not-found {
+  text-align: center;
+}
+
+.not-found__code {
+  font-size: var(--font-size-display);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-primary);
+  margin-bottom: var(--space-xs);
+}
+
+.not-found__message {
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-xl);
+}

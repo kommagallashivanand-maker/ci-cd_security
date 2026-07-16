@@ -1,0 +1,19 @@
+.page-title {
+  margin-bottom: var(--space-xl);
+}
+
+.page-title__heading {
+  font-size: var(--font-size-xxl);
+
+  font-weight: var(--font-weight-bold);
+
+  color: var(--color-text);
+}
+
+.page-title__subtitle {
+  margin-top: var(--space-xs);
+
+  color: var(--color-text-secondary);
+
+  font-size: var(--font-size-md);
+}
