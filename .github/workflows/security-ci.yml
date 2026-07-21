@@ -1,15 +1,22 @@
 # =============================================================================
-# Deskflow — Security & Code-Quality CI Pipeline
+# DeskFlow — Security & Code-Quality CI Pipeline
 # =============================================================================
-# Triggers: push or pull_request against the main branch.
+# Security:
+#   SAST             -> Semgrep
+#   Dependency Audit -> npm audit
+#   Report           -> PDF
+#   Storage          -> GitHub Actions Artifact
+#
 # Steps:
-#   1. Checkout & install dependencies
-#   2. Detect test files → run Vitest coverage if found
-#   3. npm audit → dependency vulnerability gate
-#   4. Semgrep SAST → upload SARIF to GitHub Code Scanning
-#   5. Generate baseline security PDF report
-#   6. Upload all reports as a single artifact
-#   7. Evaluate final CI gate (fail if any gate tripped)
+#   1. Checkout repository
+#   2. Install Node.js and dependencies
+#   3. Detect test files
+#   4. Run Vitest coverage if tests exist
+#   5. Run npm dependency audit
+#   6. Run Semgrep SAST
+#   7. Generate PDF security report
+#   8. Upload reports as GitHub Actions artifact
+#   9. Evaluate final CI quality gate
 # =============================================================================
 
 name: Security & Code-Quality CI
@@ -19,16 +26,13 @@ on:
     branches:
       - feature/DF_083_Quality_gates_in_CI
 
-# Minimum permissions — security-events:write is required for SARIF upload
 permissions:
   contents: read
-  security-events: write
 
 env:
-  # Coverage threshold (percentage). Override here if the project policy changes.
   COVERAGE_THRESHOLD: 85
-  NODE_VERSION: "20"
-  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "24"
+  PYTHON_VERSION: "3.12"
 
 jobs:
   security-pipeline:
@@ -36,31 +40,33 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       # -----------------------------------------------------------------------
       # 1. Checkout repository
       # -----------------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+
       # -----------------------------------------------------------------------
       # 2. Setup Node.js
       # -----------------------------------------------------------------------
-      - name: Setup Node.js ${{ env.NODE_VERSION }}
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
 
+
       # -----------------------------------------------------------------------
-      # 3. Install dependencies (reproducible via package-lock.json)
+      # 3. Install project dependencies
       # -----------------------------------------------------------------------
       - name: Install dependencies
         run: npm ci
 
+
       # -----------------------------------------------------------------------
       # 4. Detect test files
-      #    Searches common test-file patterns under src/, tests/, __tests__/.
-      #    Sets output variable HAS_TESTS=true/false for downstream steps.
       # -----------------------------------------------------------------------
       - name: Detect test cases
         id: detect_tests
@@ -82,117 +88,210 @@ jobs:
           if [ -n "$TEST_FILES" ]; then
             echo "Test files found:"
             echo "$TEST_FILES"
-            echo "HAS_TESTS=true"  >> "$GITHUB_OUTPUT"
+
+            echo "HAS_TESTS=true" >> "$GITHUB_OUTPUT"
           else
             echo "No test files found."
+
             echo "HAS_TESTS=false" >> "$GITHUB_OUTPUT"
           fi
 
+
       # -----------------------------------------------------------------------
-      # 5a. Install Vitest + coverage provider (only when tests exist)
-      #     Installs temporarily into the project without modifying package.json.
+      # 5. Install Vitest and coverage provider
+      #    Only runs when test files are available
       # -----------------------------------------------------------------------
       - name: Install Vitest and coverage provider
         if: steps.detect_tests.outputs.HAS_TESTS == 'true'
         run: |
           npm install --no-save vitest@2 @vitest/coverage-v8@2
 
+
       # -----------------------------------------------------------------------
-      # 5b. Run Vitest with coverage (only when tests exist)
-      #     --coverage.thresholds is intentionally NOT set here so we can
-      #     capture the actual percentage and compare ourselves, allowing
-      #     report generation before failing the gate.
+      # 6. Run Vitest coverage
       # -----------------------------------------------------------------------
       - name: Run Vitest coverage
         id: vitest
         if: steps.detect_tests.outputs.HAS_TESTS == 'true'
         shell: bash
+
         run: |
-          # Run vitest with JSON + text summary reporter so we can parse results
           npx vitest run \
             --coverage \
             --coverage.provider=v8 \
-            --coverage.reporter=json \
+            --coverage.reporter=json-summary \
             --coverage.reporter=text \
-            --coverage.reportingThresholds.lines=0 \
             --reporter=json \
             --outputFile=vitest-results.json \
             2>&1 | tee vitest-output.txt || true
 
-          # Parse overall lines coverage from coverage-summary.json
           COVERAGE_FILE="coverage/coverage-summary.json"
+
           if [ -f "$COVERAGE_FILE" ]; then
+
             ACTUAL=$(node -e "
               const s = require('./coverage/coverage-summary.json');
-              const t = s.total;
-              // Use lines pct as the primary metric
-              console.log(t.lines.pct);
+              console.log(s.total.lines.pct);
             ")
+
             echo "ACTUAL_COVERAGE=$ACTUAL" >> "$GITHUB_OUTPUT"
 
             THRESHOLD=${{ env.COVERAGE_THRESHOLD }}
-            # Use awk for float comparison (bash doesn't support floats natively)
-            PASS=$(awk -v a="$ACTUAL" -v t="$THRESHOLD" 'BEGIN { print (a >= t) ? "true" : "false" }')
+
+            PASS=$(awk \
+              -v a="$ACTUAL" \
+              -v t="$THRESHOLD" \
+              'BEGIN {
+                print (a >= t) ? "true" : "false"
+              }')
+
             echo "COVERAGE_PASS=$PASS" >> "$GITHUB_OUTPUT"
-            echo "Coverage: $ACTUAL% (threshold: $THRESHOLD%) → PASS=$PASS"
+
+            echo "Coverage: $ACTUAL%"
+            echo "Threshold: $THRESHOLD%"
+            echo "Coverage Pass: $PASS"
+
           else
-            echo "WARNING: coverage-summary.json not found. Treating coverage as NOT RUN."
+
+            echo "WARNING: coverage-summary.json not found."
+
             echo "ACTUAL_COVERAGE=unknown" >> "$GITHUB_OUTPUT"
-            echo "COVERAGE_PASS=unknown"   >> "$GITHUB_OUTPUT"
+            echo "COVERAGE_PASS=unknown" >> "$GITHUB_OUTPUT"
+
           fi
 
-      # -----------------------------------------------------------------------
-      # 6. npm audit — dependency vulnerability scan
-      #    Always runs. Captures exit code without immediately failing so that
-      #    report generation can still complete.
-      # -----------------------------------------------------------------------
-      - name: npm dependency audit
+
+      # =======================================================================
+      # DEPENDENCY AUDIT
+      # Tool: npm audit
+      # =======================================================================
+
+      - name: Run npm dependency audit
         id: npm_audit
         shell: bash
-        run: |
-          # Human-readable output (printed to log)
-          npm audit --audit-level=none || true
 
-          # Machine-readable JSON report saved for PDF generation
+        run: |
+
+          echo "Running npm dependency security audit..."
+
+          # ---------------------------------------------------------------
+          # Human-readable output in GitHub Actions log
+          # ---------------------------------------------------------------
+
+          npm audit || true
+
+
+          # ---------------------------------------------------------------
+          # JSON output used by PDF report
+          # ---------------------------------------------------------------
+
           npm audit --json > npm-audit.json 2>&1 || true
 
-          # Evaluate High/Critical counts
+
+          # ---------------------------------------------------------------
+          # Count High + Critical vulnerabilities
+          # ---------------------------------------------------------------
+
           HIGH=$(node -e "
+
             try {
-              const r = require('./npm-audit.json');
-              // npm audit v2 format
-              const v = r.metadata?.vulnerabilities || {};
-              console.log((v.high || 0) + (v.critical || 0));
-            } catch(e) { console.log(0); }
+
+              const report = require('./npm-audit.json');
+
+              const vulnerabilities =
+                report.metadata?.vulnerabilities || {};
+
+              const high =
+                vulnerabilities.high || 0;
+
+              const critical =
+                vulnerabilities.critical || 0;
+
+              console.log(high + critical);
+
+            } catch(error) {
+
+              console.log(0);
+
+            }
+
           ")
+
+
           echo "HIGH_CRITICAL_COUNT=$HIGH" >> "$GITHUB_OUTPUT"
 
+
+          # ---------------------------------------------------------------
+          # Dependency quality gate
+          # ---------------------------------------------------------------
+
           if [ "$HIGH" -gt 0 ]; then
+
             echo "AUDIT_PASS=false" >> "$GITHUB_OUTPUT"
+
             echo "::warning::npm audit found $HIGH High/Critical vulnerabilities."
+
           else
+
             echo "AUDIT_PASS=true" >> "$GITHUB_OUTPUT"
-            echo "npm audit: no High/Critical vulnerabilities found."
+
+            echo "npm audit passed."
+
           fi
 
+
+      # =======================================================================
+      # SAST SCAN
+      # Tool: Semgrep
+      # =======================================================================
+
       # -----------------------------------------------------------------------
-      # 7. Semgrep SAST scan
-      #    Runs the p/javascript and p/react rulesets.
-      #    Outputs both JSON (for PDF) and SARIF (for GitHub Code Scanning).
+      # Setup Python
+      #
+      # Python is required for:
+      #   - Semgrep
+      #   - ReportLab PDF generation
       # -----------------------------------------------------------------------
-      - name: Setup Python for Semgrep
+
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install Semgrep
-        run: pip install semgrep==1.90.0
+
+      # -----------------------------------------------------------------------
+      # Install Semgrep + ReportLab
+      #
+      # This fixes:
+      #
+      # ModuleNotFoundError:
+      # No module named 'reportlab'
+      # -----------------------------------------------------------------------
+
+      - name: Install security and report dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install semgrep==1.90.0 reportlab==4.2.5
+
+
+      # -----------------------------------------------------------------------
+      # Run Semgrep SAST
+      #
+      # JSON output is generated because our Python report generator
+      # will read this file.
+      #
+      # NO CODEQL
+      # NO GitHub Code Scanning SARIF upload
+      # -----------------------------------------------------------------------
 
       - name: Run Semgrep SAST scan
         id: semgrep
         shell: bash
+
         run: |
-          # JSON output for PDF report
+
+          echo "Running Semgrep SAST scan..."
+
           semgrep \
             --config=p/javascript \
             --config=p/react \
@@ -202,175 +301,356 @@ jobs:
             --exclude=dist \
             . || true
 
-          # SARIF output for GitHub Code Scanning
-          semgrep \
-            --config=p/javascript \
-            --config=p/react \
-            --sarif \
-            --output=semgrep-results.sarif \
-            --exclude=node_modules \
-            --exclude=dist \
-            . || true
 
-          # Count findings by severity
+          # ---------------------------------------------------------------
+          # Count ERROR severity findings
+          # ---------------------------------------------------------------
+
           SEMGREP_ERRORS=$(node -e "
+
             try {
-              const r = require('./semgrep-results.json');
-              const findings = r.results || [];
-              const errors = findings.filter(f =>
-                (f.extra?.severity || '').toUpperCase() === 'ERROR'
-              ).length;
+
+              const report =
+                require('./semgrep-results.json');
+
+              const findings =
+                report.results || [];
+
+              const errors =
+                findings.filter(f =>
+                  (f.extra?.severity || '')
+                  .toUpperCase() === 'ERROR'
+                ).length;
+
               console.log(errors);
-            } catch(e) { console.log(0); }
+
+            } catch(error) {
+
+              console.log(0);
+
+            }
+
           ")
+
+
+          # ---------------------------------------------------------------
+          # Count total findings
+          # ---------------------------------------------------------------
+
           SEMGREP_TOTAL=$(node -e "
+
             try {
-              const r = require('./semgrep-results.json');
-              console.log((r.results || []).length);
-            } catch(e) { console.log(0); }
+
+              const report =
+                require('./semgrep-results.json');
+
+              console.log(
+                (report.results || []).length
+              );
+
+            } catch(error) {
+
+              console.log(0);
+
+            }
+
           ")
 
-          echo "SEMGREP_TOTAL=$SEMGREP_TOTAL"   >> "$GITHUB_OUTPUT"
-          echo "SEMGREP_ERRORS=$SEMGREP_ERRORS" >> "$GITHUB_OUTPUT"
 
-          # Gate: fail if any ERROR/CRITICAL findings
+          echo "SEMGREP_TOTAL=$SEMGREP_TOTAL" \
+            >> "$GITHUB_OUTPUT"
+
+          echo "SEMGREP_ERRORS=$SEMGREP_ERRORS" \
+            >> "$GITHUB_OUTPUT"
+
+
+          # ---------------------------------------------------------------
+          # Semgrep quality gate
+          # ---------------------------------------------------------------
+
           if [ "$SEMGREP_ERRORS" -gt 0 ]; then
-            echo "SEMGREP_PASS=false" >> "$GITHUB_OUTPUT"
+
+            echo "SEMGREP_PASS=false" \
+              >> "$GITHUB_OUTPUT"
+
             echo "::warning::Semgrep found $SEMGREP_ERRORS ERROR-level findings."
+
           else
-            echo "SEMGREP_PASS=true" >> "$GITHUB_OUTPUT"
+
+            echo "SEMGREP_PASS=true" \
+              >> "$GITHUB_OUTPUT"
+
           fi
 
-          echo "Semgrep scan complete. Total: $SEMGREP_TOTAL, Errors: $SEMGREP_ERRORS"
 
-      # -----------------------------------------------------------------------
-      # 8. Upload Semgrep SARIF to GitHub Code Scanning
-      # -----------------------------------------------------------------------
-      - name: Upload Semgrep SARIF to GitHub Code Scanning
-        uses: github/codeql-action/upload-sarif@v3
-        if: always() && hashFiles('semgrep-results.sarif') != ''
-        with:
-          sarif_file: semgrep-results.sarif
-          category: semgrep
+          echo "Semgrep scan completed."
+          echo "Total findings: $SEMGREP_TOTAL"
+          echo "ERROR findings: $SEMGREP_ERRORS"
 
-      # -----------------------------------------------------------------------
-      # 9. Generate baseline PDF security report
-      #    Uses a Python script with the reportlab library.
-      # -----------------------------------------------------------------------
-      - name: Install PDF generation dependencies
-        run: pip install reportlab==4.2.5
+
+      # =======================================================================
+      # GENERATE PDF SECURITY REPORT
+      # =======================================================================
 
       - name: Generate PDF security report
         if: always()
-        shell: bash
-        env:
-          REPO_NAME:        ${{ github.repository }}
-          BRANCH_NAME:      ${{ github.ref_name }}
-          COMMIT_SHA:       ${{ github.sha }}
-          RUN_ID:           ${{ github.run_id }}
-          RUN_NUMBER:       ${{ github.run_number }}
-          HAS_TESTS:        ${{ steps.detect_tests.outputs.HAS_TESTS }}
-          ACTUAL_COVERAGE:  ${{ steps.vitest.outputs.ACTUAL_COVERAGE }}
-          COVERAGE_PASS:    ${{ steps.vitest.outputs.COVERAGE_PASS }}
-          AUDIT_PASS:       ${{ steps.npm_audit.outputs.AUDIT_PASS }}
-          HIGH_CRITICAL:    ${{ steps.npm_audit.outputs.HIGH_CRITICAL_COUNT }}
-          SEMGREP_TOTAL:    ${{ steps.semgrep.outputs.SEMGREP_TOTAL }}
-          SEMGREP_ERRORS:   ${{ steps.semgrep.outputs.SEMGREP_ERRORS }}
-          SEMGREP_PASS:     ${{ steps.semgrep.outputs.SEMGREP_PASS }}
-          COVERAGE_THRESHOLD: ${{ env.COVERAGE_THRESHOLD }}
-        run: python .github/scripts/generate_report.py
 
-      # -----------------------------------------------------------------------
-      # 10. Collect all reports into one directory for artifact upload
-      # -----------------------------------------------------------------------
-      - name: Collect reports
-        if: always()
         shell: bash
+
+        env:
+
+          REPO_NAME: ${{ github.repository }}
+
+          BRANCH_NAME: ${{ github.ref_name }}
+
+          COMMIT_SHA: ${{ github.sha }}
+
+          RUN_ID: ${{ github.run_id }}
+
+          RUN_NUMBER: ${{ github.run_number }}
+
+          HAS_TESTS: ${{ steps.detect_tests.outputs.HAS_TESTS }}
+
+          ACTUAL_COVERAGE: ${{ steps.vitest.outputs.ACTUAL_COVERAGE }}
+
+          COVERAGE_PASS: ${{ steps.vitest.outputs.COVERAGE_PASS }}
+
+          AUDIT_PASS: ${{ steps.npm_audit.outputs.AUDIT_PASS }}
+
+          HIGH_CRITICAL: ${{ steps.npm_audit.outputs.HIGH_CRITICAL_COUNT }}
+
+          SEMGREP_TOTAL: ${{ steps.semgrep.outputs.SEMGREP_TOTAL }}
+
+          SEMGREP_ERRORS: ${{ steps.semgrep.outputs.SEMGREP_ERRORS }}
+
+          SEMGREP_PASS: ${{ steps.semgrep.outputs.SEMGREP_PASS }}
+
+          COVERAGE_THRESHOLD: ${{ env.COVERAGE_THRESHOLD }}
+
         run: |
+
+          echo "Generating PDF security report..."
+
+          python .github/scripts/generate_report.py
+
+
+      # =======================================================================
+      # COLLECT SECURITY REPORTS
+      # =======================================================================
+
+      - name: Collect security reports
+        if: always()
+
+        shell: bash
+
+        run: |
+
           mkdir -p security-reports
 
-          [ -f security-report.pdf ]       && cp security-report.pdf       security-reports/
-          [ -f npm-audit.json ]            && cp npm-audit.json            security-reports/
-          [ -f semgrep-results.json ]      && cp semgrep-results.json      security-reports/
-          [ -f semgrep-results.sarif ]     && cp semgrep-results.sarif     security-reports/
 
-          # Include coverage report directory if it exists
-          if [ -d coverage ]; then
-            cp -r coverage security-reports/coverage
+          # ---------------------------------------------------------------
+          # PDF security report
+          # ---------------------------------------------------------------
+
+          if [ -f security-report.pdf ]; then
+
+            cp security-report.pdf \
+              security-reports/
+
           fi
 
-          echo "Contents of security-reports/:"
+
+          # ---------------------------------------------------------------
+          # npm dependency audit JSON
+          # ---------------------------------------------------------------
+
+          if [ -f npm-audit.json ]; then
+
+            cp npm-audit.json \
+              security-reports/
+
+          fi
+
+
+          # ---------------------------------------------------------------
+          # Semgrep SAST JSON
+          # ---------------------------------------------------------------
+
+          if [ -f semgrep-results.json ]; then
+
+            cp semgrep-results.json \
+              security-reports/
+
+          fi
+
+
+          # ---------------------------------------------------------------
+          # Coverage report
+          # ---------------------------------------------------------------
+
+          if [ -d coverage ]; then
+
+            cp -r coverage \
+              security-reports/coverage
+
+          fi
+
+
+          echo ""
+          echo "Generated security reports:"
+          echo ""
+
           ls -lh security-reports/
 
-      # -----------------------------------------------------------------------
-      # 11. Upload artifact — accessible from Actions → Workflow Run → Artifacts
-      # -----------------------------------------------------------------------
+
+      # =======================================================================
+      # STORE REPORTS
+      # Storage: GitHub Actions Artifact
+      # =======================================================================
+
       - name: Upload security reports artifact
         if: always()
+
         uses: actions/upload-artifact@v4
+
         with:
-          name: Security Baseline Report
+
+          name: Security-Baseline-Report
+
           path: security-reports/
+
           retention-days: 30
 
-      # -----------------------------------------------------------------------
-      # 12. Final CI gate
-      #     Evaluates all gate flags collected during earlier steps.
-      #     Runs last so reports are always generated and uploaded first.
-      # -----------------------------------------------------------------------
+          if-no-files-found: warn
+
+
+      # =======================================================================
+      # FINAL CI QUALITY GATE
+      #
+      # Runs AFTER report generation and artifact upload.
+      #
+      # Therefore even if vulnerabilities are found:
+      #
+      #     PDF will still be generated
+      #     Artifact will still be uploaded
+      #     CI will fail only at this final step
+      # =======================================================================
+
       - name: Evaluate final CI gate
         if: always()
+
         shell: bash
+
         env:
-          HAS_TESTS:       ${{ steps.detect_tests.outputs.HAS_TESTS }}
-          COVERAGE_PASS:   ${{ steps.vitest.outputs.COVERAGE_PASS }}
+
+          HAS_TESTS: ${{ steps.detect_tests.outputs.HAS_TESTS }}
+
+          COVERAGE_PASS: ${{ steps.vitest.outputs.COVERAGE_PASS }}
+
           ACTUAL_COVERAGE: ${{ steps.vitest.outputs.ACTUAL_COVERAGE }}
-          AUDIT_PASS:      ${{ steps.npm_audit.outputs.AUDIT_PASS }}
-          HIGH_CRITICAL:   ${{ steps.npm_audit.outputs.HIGH_CRITICAL_COUNT }}
-          SEMGREP_PASS:    ${{ steps.semgrep.outputs.SEMGREP_PASS }}
-          SEMGREP_ERRORS:  ${{ steps.semgrep.outputs.SEMGREP_ERRORS }}
+
+          AUDIT_PASS: ${{ steps.npm_audit.outputs.AUDIT_PASS }}
+
+          HIGH_CRITICAL: ${{ steps.npm_audit.outputs.HIGH_CRITICAL_COUNT }}
+
+          SEMGREP_PASS: ${{ steps.semgrep.outputs.SEMGREP_PASS }}
+
+          SEMGREP_ERRORS: ${{ steps.semgrep.outputs.SEMGREP_ERRORS }}
+
           COVERAGE_THRESHOLD: ${{ env.COVERAGE_THRESHOLD }}
+
         run: |
+
           FAIL=false
 
+
           echo "========================================="
-          echo "         FINAL CI GATE EVALUATION        "
+          echo "        FINAL CI GATE EVALUATION         "
           echo "========================================="
 
-          # --- Coverage gate ---
+
+          # ---------------------------------------------------------------
+          # Coverage gate
+          # ---------------------------------------------------------------
+
           if [ "$HAS_TESTS" = "true" ]; then
+
             if [ "$COVERAGE_PASS" = "false" ]; then
-              echo "❌ Coverage FAILED: $ACTUAL_COVERAGE% is below threshold $COVERAGE_THRESHOLD%"
+
+              echo "❌ Coverage FAILED"
+              echo "$ACTUAL_COVERAGE% < $COVERAGE_THRESHOLD%"
+
               FAIL=true
+
             elif [ "$COVERAGE_PASS" = "true" ]; then
-              echo "✅ Coverage PASSED: $ACTUAL_COVERAGE% >= $COVERAGE_THRESHOLD%"
+
+              echo "✅ Coverage PASSED"
+              echo "$ACTUAL_COVERAGE% >= $COVERAGE_THRESHOLD%"
+
             else
-              echo "⚠️  Coverage result unknown (coverage-summary.json missing)"
+
+              echo "⚠️ Coverage result unknown."
+
             fi
+
           else
-            echo "⏭️  Coverage SKIPPED: no test cases found"
+
+            echo "⏭️ Coverage SKIPPED — no test cases found."
+
           fi
 
-          # --- Dependency audit gate ---
+
+          # ---------------------------------------------------------------
+          # Dependency Audit
+          # ---------------------------------------------------------------
+
           if [ "$AUDIT_PASS" = "false" ]; then
-            echo "❌ Dependency Audit FAILED: $HIGH_CRITICAL High/Critical vulnerabilities"
+
+            echo "❌ Dependency Audit FAILED"
+            echo "$HIGH_CRITICAL High/Critical vulnerabilities found."
+
             FAIL=true
+
           else
+
             echo "✅ Dependency Audit PASSED"
+
           fi
 
-          # --- Semgrep SAST gate ---
+
+          # ---------------------------------------------------------------
+          # Semgrep SAST
+          # ---------------------------------------------------------------
+
           if [ "$SEMGREP_PASS" = "false" ]; then
-            echo "❌ Semgrep SAST FAILED: $SEMGREP_ERRORS ERROR-level findings"
+
+            echo "❌ Semgrep SAST FAILED"
+            echo "$SEMGREP_ERRORS ERROR-level findings found."
+
             FAIL=true
+
           else
+
             echo "✅ Semgrep SAST PASSED"
+
           fi
+
 
           echo "========================================="
+
+
+          # ---------------------------------------------------------------
+          # Final status
+          # ---------------------------------------------------------------
+
           if [ "$FAIL" = "true" ]; then
+
             echo "Overall Status: ❌ FAIL"
+
             exit 1
+
           else
+
             echo "Overall Status: ✅ PASS"
+
           fi
