@@ -1,0 +1,25 @@
+/*
+ * Overrides for react-hot-toast's default styling so toasts follow
+ * the DeskFlow design tokens instead of the library's built-in theme.
+ * react-hot-toast renders inline styles on the toast wrapper; the
+ * `!important` overrides below are scoped to this class only and are
+ * required to take precedence over those inline styles.
+ */
+.toast {
+  padding: var(--space-md) var(--space-lg) !important;
+  border-radius: var(--radius-md) !important;
+  background-color: var(--color-surface) !important;
+  color: var(--color-text) !important;
+  box-shadow: var(--shadow-lg) !important;
+  font-size: var(--font-size-sm) !important;
+  font-family: var(--font-family) !important;
+  border: 1px solid var(--color-border);
+}
+
+.toast--success {
+  border-left: 3px solid var(--color-success);
+}
+
+.toast--error {
+  border-left: 3px solid var(--color-danger);
+}
