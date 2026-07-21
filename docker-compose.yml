@@ -1,5 +1,24 @@
 services:
   deskflow:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: deskflow:latest
+    container_name: deskflow
     ports:
-      - "5173:80"
+      - "8080:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      com.deskflow.app: "deskflow"
+      com.deskflow.version: "0.0.0"
