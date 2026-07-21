@@ -17,7 +17,7 @@ name: Security & Code-Quality CI
 on:
   push:
     branches:
-      - feature/DF_083 _Quality_gates_in_CI
+      - feature/DF_083_Quality_gates_in_CI
 
 # Minimum permissions — security-events:write is required for SARIF upload
 permissions:
