@@ -6,7 +6,7 @@
 #   Code Coverage     -> Vitest
 #   Dependency Audit  -> npm audit
 #   SAST              -> Semgrep
-#   Secret Scanning   -> Gitleaks
+#   Secret Scanning   -> Gitleaks CLI
 #   Report            -> PDF
 #   Storage           -> GitHub Actions Artifact
 #
@@ -26,6 +26,7 @@ env:
   COVERAGE_THRESHOLD: 85
   NODE_VERSION: "24"
   PYTHON_VERSION: "3.12"
+  GITLEAKS_VERSION: "8.28.0"
 
 jobs:
 
@@ -44,24 +45,150 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Full history allows Gitleaks to inspect Git history
+          # Full Git history is required for complete Gitleaks Git scanning
           fetch-depth: 0
 
 
       # =====================================================================
-      # 2. GITLEAKS SECRET SCANNING
+      # 2. INSTALL GITLEAKS CLI
+      # =====================================================================
+
+      - name: Install Gitleaks CLI
+        shell: bash
+        run: |
+
+          echo "Installing Gitleaks version ${GITLEAKS_VERSION}..."
+
+          curl -sSfL \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            -o gitleaks.tar.gz
+
+          tar -xzf gitleaks.tar.gz
+
+          sudo mv gitleaks /usr/local/bin/gitleaks
+
+          rm -f gitleaks.tar.gz
+
+          echo "Gitleaks installed successfully."
+
+          gitleaks version
+
+
+      # =====================================================================
+      # 3. RUN GITLEAKS SECRET SCAN
       # =====================================================================
 
       - name: Run Gitleaks Secret Scan
         id: gitleaks
-        continue-on-error: true
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+
+        run: |
+
+          echo "Running Gitleaks secret scan..."
+
+          # ---------------------------------------------------------------
+          # Disable immediate shell failure.
+          #
+          # Gitleaks returns:
+          #   0 -> no secrets detected
+          #   1 -> secrets detected
+          #   other -> scan/runtime error
+          #
+          # We capture the result and let the final CI gate decide whether
+          # the complete workflow should fail.
+          # ---------------------------------------------------------------
+
+          set +e
+
+          gitleaks git . \
+            --report-format json \
+            --report-path gitleaks-report.json \
+            --redact
+
+          GITLEAKS_EXIT_CODE=$?
+
+          set -e
+
+
+          # ---------------------------------------------------------------
+          # Count findings from JSON report
+          # ---------------------------------------------------------------
+
+          GITLEAKS_FINDINGS=$(python3 - <<'PY'
+          import json
+          import os
+
+          path = "gitleaks-report.json"
+
+          try:
+              if os.path.exists(path):
+                  with open(path, "r", encoding="utf-8") as file:
+                      data = json.load(file)
+
+                  print(len(data) if isinstance(data, list) else 0)
+              else:
+                  print(0)
+
+          except Exception:
+              print(0)
+          PY
+          )
+
+
+          echo "GITLEAKS_FINDINGS=$GITLEAKS_FINDINGS" \
+            >> "$GITHUB_OUTPUT"
+
+
+          # ---------------------------------------------------------------
+          # Evaluate Gitleaks result
+          # ---------------------------------------------------------------
+
+          if [ "$GITLEAKS_EXIT_CODE" -eq 0 ]; then
+
+            echo "GITLEAKS_PASS=true" \
+              >> "$GITHUB_OUTPUT"
+
+            echo "GITLEAKS_SCAN_ERROR=false" \
+              >> "$GITHUB_OUTPUT"
+
+            echo "Gitleaks scan PASSED."
+            echo "No potential secrets detected."
+
+
+          elif [ "$GITLEAKS_EXIT_CODE" -eq 1 ]; then
+
+            echo "GITLEAKS_PASS=false" \
+              >> "$GITHUB_OUTPUT"
+
+            echo "GITLEAKS_SCAN_ERROR=false" \
+              >> "$GITHUB_OUTPUT"
+
+            echo "::warning::Gitleaks detected $GITLEAKS_FINDINGS potential secret(s)."
+
+
+          else
+
+            echo "GITLEAKS_PASS=false" \
+              >> "$GITHUB_OUTPUT"
+
+            echo "GITLEAKS_SCAN_ERROR=true" \
+              >> "$GITHUB_OUTPUT"
+
+            echo "::warning::Gitleaks scan encountered an error. Exit code: $GITLEAKS_EXIT_CODE"
+
+          fi
+
+
+          echo "Gitleaks findings: $GITLEAKS_FINDINGS"
+
+          # Do not fail here.
+          # Final CI quality gate will determine final status.
+
+          exit 0
 
 
       # =====================================================================
-      # 3. SETUP NODE.JS
+      # 4. SETUP NODE.JS
       # =====================================================================
 
       - name: Setup Node.js
@@ -73,22 +200,19 @@ jobs:
 
 
       # =====================================================================
-      # 4. INSTALL PROJECT DEPENDENCIES
+      # 5. INSTALL PROJECT DEPENDENCIES
       # =====================================================================
 
       - name: Install dependencies
-
         run: npm ci
 
 
       # =====================================================================
-      # 5. DETECT TEST CASES
+      # 6. DETECT TEST CASES
       # =====================================================================
 
       - name: Detect test cases
-
         id: detect_tests
-
         shell: bash
 
         run: |
@@ -110,41 +234,45 @@ jobs:
               -o -name "*.spec.tsx" \
             \) 2>/dev/null || true)
 
+
           if [ -n "$TEST_FILES" ]; then
 
             echo "Test files found:"
+
             echo "$TEST_FILES"
 
-            echo "HAS_TESTS=true" >> "$GITHUB_OUTPUT"
+            echo "HAS_TESTS=true" \
+              >> "$GITHUB_OUTPUT"
 
           else
 
             echo "No test files found."
 
-            echo "HAS_TESTS=false" >> "$GITHUB_OUTPUT"
+            echo "HAS_TESTS=false" \
+              >> "$GITHUB_OUTPUT"
 
           fi
 
 
       # =====================================================================
-      # 6. INSTALL VITEST + COVERAGE
+      # 7. INSTALL VITEST + COVERAGE
       # =====================================================================
 
       - name: Install Vitest and coverage provider
-
         if: steps.detect_tests.outputs.HAS_TESTS == 'true'
 
         run: |
 
-          npm install --no-save vitest@2 @vitest/coverage-v8@2
+          npm install --no-save \
+            vitest@2 \
+            @vitest/coverage-v8@2
 
 
       # =====================================================================
-      # 7. RUN CODE COVERAGE
+      # 8. RUN CODE COVERAGE
       # =====================================================================
 
       - name: Run Vitest coverage
-
         id: vitest
 
         if: steps.detect_tests.outputs.HAS_TESTS == 'true'
@@ -174,7 +302,8 @@ jobs:
             ")
 
 
-            echo "ACTUAL_COVERAGE=$ACTUAL" >> "$GITHUB_OUTPUT"
+            echo "ACTUAL_COVERAGE=$ACTUAL" \
+              >> "$GITHUB_OUTPUT"
 
 
             THRESHOLD=${{ env.COVERAGE_THRESHOLD }}
@@ -188,7 +317,8 @@ jobs:
               }')
 
 
-            echo "COVERAGE_PASS=$PASS" >> "$GITHUB_OUTPUT"
+            echo "COVERAGE_PASS=$PASS" \
+              >> "$GITHUB_OUTPUT"
 
 
             echo "Coverage: $ACTUAL%"
@@ -200,22 +330,24 @@ jobs:
 
             echo "WARNING: coverage-summary.json not found."
 
-            echo "ACTUAL_COVERAGE=unknown" >> "$GITHUB_OUTPUT"
 
-            echo "COVERAGE_PASS=unknown" >> "$GITHUB_OUTPUT"
+            echo "ACTUAL_COVERAGE=unknown" \
+              >> "$GITHUB_OUTPUT"
+
+
+            echo "COVERAGE_PASS=unknown" \
+              >> "$GITHUB_OUTPUT"
 
           fi
 
 
       # =====================================================================
-      # 8. DEPENDENCY AUDIT
+      # 9. DEPENDENCY AUDIT
       # Tool: npm audit
       # =====================================================================
 
       - name: Run npm dependency audit
-
         id: npm_audit
-
         shell: bash
 
         run: |
@@ -223,21 +355,30 @@ jobs:
           echo "Running npm dependency security audit..."
 
 
-          # Human readable result
+          # ---------------------------------------------------------------
+          # Human-readable output
+          # ---------------------------------------------------------------
+
           npm audit || true
 
 
-          # JSON result for PDF report
+          # ---------------------------------------------------------------
+          # JSON report for PDF generation
+          # ---------------------------------------------------------------
+
           npm audit --json > npm-audit.json 2>&1 || true
 
 
+          # ---------------------------------------------------------------
           # Count High + Critical vulnerabilities
+          # ---------------------------------------------------------------
 
           HIGH=$(node -e "
 
             try {
 
-              const report = require('./npm-audit.json');
+              const report =
+                require('./npm-audit.json');
 
               const vulnerabilities =
                 report.metadata?.vulnerabilities || {};
@@ -259,18 +400,25 @@ jobs:
           ")
 
 
-          echo "HIGH_CRITICAL_COUNT=$HIGH" >> "$GITHUB_OUTPUT"
+          echo "HIGH_CRITICAL_COUNT=$HIGH" \
+            >> "$GITHUB_OUTPUT"
 
+
+          # ---------------------------------------------------------------
+          # Dependency quality gate
+          # ---------------------------------------------------------------
 
           if [ "$HIGH" -gt 0 ]; then
 
-            echo "AUDIT_PASS=false" >> "$GITHUB_OUTPUT"
+            echo "AUDIT_PASS=false" \
+              >> "$GITHUB_OUTPUT"
 
             echo "::warning::npm audit found $HIGH High/Critical vulnerabilities."
 
           else
 
-            echo "AUDIT_PASS=true" >> "$GITHUB_OUTPUT"
+            echo "AUDIT_PASS=true" \
+              >> "$GITHUB_OUTPUT"
 
             echo "npm audit passed."
 
@@ -278,20 +426,18 @@ jobs:
 
 
       # =====================================================================
-      # 9. SETUP PYTHON
+      # 10. SETUP PYTHON
       # =====================================================================
 
       - name: Setup Python
-
         uses: actions/setup-python@v5
 
         with:
-
           python-version: ${{ env.PYTHON_VERSION }}
 
 
       # =====================================================================
-      # 10. INSTALL SEMGREP + REPORTLAB
+      # 11. INSTALL SEMGREP + REPORTLAB
       # =====================================================================
 
       - name: Install security and report dependencies
@@ -300,17 +446,17 @@ jobs:
 
           python -m pip install --upgrade pip
 
-          python -m pip install semgrep==1.90.0 reportlab==4.2.5
+          python -m pip install \
+            semgrep==1.90.0 \
+            reportlab==4.2.5
 
 
       # =====================================================================
-      # 11. SEMGREP SAST SCAN
+      # 12. SEMGREP SAST SCAN
       # =====================================================================
 
       - name: Run Semgrep SAST scan
-
         id: semgrep
-
         shell: bash
 
         run: |
@@ -328,7 +474,9 @@ jobs:
             . || true
 
 
+          # ---------------------------------------------------------------
           # Count ERROR severity findings
+          # ---------------------------------------------------------------
 
           SEMGREP_ERRORS=$(node -e "
 
@@ -357,7 +505,9 @@ jobs:
           ")
 
 
+          # ---------------------------------------------------------------
           # Count total findings
+          # ---------------------------------------------------------------
 
           SEMGREP_TOTAL=$(node -e "
 
@@ -387,7 +537,9 @@ jobs:
             >> "$GITHUB_OUTPUT"
 
 
+          # ---------------------------------------------------------------
           # Semgrep Quality Gate
+          # ---------------------------------------------------------------
 
           if [ "$SEMGREP_ERRORS" -gt 0 ]; then
 
@@ -412,7 +564,7 @@ jobs:
 
 
       # =====================================================================
-      # 12. GENERATE PDF SECURITY REPORT
+      # 13. GENERATE PDF SECURITY REPORT
       # =====================================================================
 
       - name: Generate PDF security report
@@ -422,6 +574,8 @@ jobs:
         shell: bash
 
         env:
+
+          # Repository information
 
           REPO_NAME: ${{ github.repository }}
 
@@ -434,17 +588,25 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
 
 
+          # Coverage information
+
           HAS_TESTS: ${{ steps.detect_tests.outputs.HAS_TESTS }}
 
           ACTUAL_COVERAGE: ${{ steps.vitest.outputs.ACTUAL_COVERAGE }}
 
           COVERAGE_PASS: ${{ steps.vitest.outputs.COVERAGE_PASS }}
 
+          COVERAGE_THRESHOLD: ${{ env.COVERAGE_THRESHOLD }}
+
+
+          # Dependency audit information
 
           AUDIT_PASS: ${{ steps.npm_audit.outputs.AUDIT_PASS }}
 
           HIGH_CRITICAL: ${{ steps.npm_audit.outputs.HIGH_CRITICAL_COUNT }}
 
+
+          # Semgrep information
 
           SEMGREP_TOTAL: ${{ steps.semgrep.outputs.SEMGREP_TOTAL }}
 
@@ -453,10 +615,13 @@ jobs:
           SEMGREP_PASS: ${{ steps.semgrep.outputs.SEMGREP_PASS }}
 
 
-          GITLEAKS_OUTCOME: ${{ steps.gitleaks.outcome }}
+          # Gitleaks information
 
+          GITLEAKS_PASS: ${{ steps.gitleaks.outputs.GITLEAKS_PASS }}
 
-          COVERAGE_THRESHOLD: ${{ env.COVERAGE_THRESHOLD }}
+          GITLEAKS_FINDINGS: ${{ steps.gitleaks.outputs.GITLEAKS_FINDINGS }}
+
+          GITLEAKS_SCAN_ERROR: ${{ steps.gitleaks.outputs.GITLEAKS_SCAN_ERROR }}
 
 
         run: |
@@ -467,7 +632,7 @@ jobs:
 
 
       # =====================================================================
-      # 13. COLLECT SECURITY REPORTS
+      # 14. COLLECT SECURITY REPORTS
       # =====================================================================
 
       - name: Collect security reports
@@ -481,7 +646,9 @@ jobs:
           mkdir -p security-reports
 
 
+          # ---------------------------------------------------------------
           # PDF Report
+          # ---------------------------------------------------------------
 
           if [ -f security-report.pdf ]; then
 
@@ -491,7 +658,9 @@ jobs:
           fi
 
 
-          # npm audit JSON
+          # ---------------------------------------------------------------
+          # npm Audit JSON
+          # ---------------------------------------------------------------
 
           if [ -f npm-audit.json ]; then
 
@@ -501,7 +670,9 @@ jobs:
           fi
 
 
+          # ---------------------------------------------------------------
           # Semgrep JSON
+          # ---------------------------------------------------------------
 
           if [ -f semgrep-results.json ]; then
 
@@ -511,7 +682,21 @@ jobs:
           fi
 
 
+          # ---------------------------------------------------------------
+          # Gitleaks JSON
+          # ---------------------------------------------------------------
+
+          if [ -f gitleaks-report.json ]; then
+
+            cp gitleaks-report.json \
+              security-reports/
+
+          fi
+
+
+          # ---------------------------------------------------------------
           # Coverage Report
+          # ---------------------------------------------------------------
 
           if [ -d coverage ]; then
 
@@ -531,7 +716,7 @@ jobs:
 
 
       # =====================================================================
-      # 14. UPLOAD REPORT AS GITHUB ACTIONS ARTIFACT
+      # 15. UPLOAD REPORTS AS GITHUB ACTIONS ARTIFACT
       # =====================================================================
 
       - name: Upload security reports artifact
@@ -552,7 +737,7 @@ jobs:
 
 
       # =====================================================================
-      # 15. FINAL CI QUALITY GATE
+      # 16. FINAL CI QUALITY GATE
       # =====================================================================
 
       - name: Evaluate final CI gate
@@ -563,27 +748,38 @@ jobs:
 
         env:
 
+          # Coverage
+
           HAS_TESTS: ${{ steps.detect_tests.outputs.HAS_TESTS }}
 
           COVERAGE_PASS: ${{ steps.vitest.outputs.COVERAGE_PASS }}
 
           ACTUAL_COVERAGE: ${{ steps.vitest.outputs.ACTUAL_COVERAGE }}
 
+          COVERAGE_THRESHOLD: ${{ env.COVERAGE_THRESHOLD }}
+
+
+          # Dependency audit
 
           AUDIT_PASS: ${{ steps.npm_audit.outputs.AUDIT_PASS }}
 
           HIGH_CRITICAL: ${{ steps.npm_audit.outputs.HIGH_CRITICAL_COUNT }}
 
 
+          # Semgrep
+
           SEMGREP_PASS: ${{ steps.semgrep.outputs.SEMGREP_PASS }}
 
           SEMGREP_ERRORS: ${{ steps.semgrep.outputs.SEMGREP_ERRORS }}
 
 
-          GITLEAKS_OUTCOME: ${{ steps.gitleaks.outcome }}
+          # Gitleaks
 
+          GITLEAKS_PASS: ${{ steps.gitleaks.outputs.GITLEAKS_PASS }}
 
-          COVERAGE_THRESHOLD: ${{ env.COVERAGE_THRESHOLD }}
+          GITLEAKS_FINDINGS: ${{ steps.gitleaks.outputs.GITLEAKS_FINDINGS }}
+
+          GITLEAKS_SCAN_ERROR: ${{ steps.gitleaks.outputs.GITLEAKS_SCAN_ERROR }}
 
 
         run: |
@@ -624,6 +820,8 @@ jobs:
 
               echo "⚠️ Coverage result unknown."
 
+              FAIL=true
+
             fi
 
 
@@ -647,9 +845,16 @@ jobs:
             FAIL=true
 
 
-          else
+          elif [ "$AUDIT_PASS" = "true" ]; then
 
             echo "✅ Dependency Audit PASSED"
+
+
+          else
+
+            echo "⚠️ Dependency Audit result unknown."
+
+            FAIL=true
 
           fi
 
@@ -667,9 +872,16 @@ jobs:
             FAIL=true
 
 
-          else
+          elif [ "$SEMGREP_PASS" = "true" ]; then
 
             echo "✅ Semgrep SAST PASSED"
+
+
+          else
+
+            echo "⚠️ Semgrep SAST result unknown."
+
+            FAIL=true
 
           fi
 
@@ -678,23 +890,36 @@ jobs:
           # GITLEAKS SECRET SCAN
           # ===============================================================
 
-          if [ "$GITLEAKS_OUTCOME" = "failure" ]; then
+          if [ "$GITLEAKS_SCAN_ERROR" = "true" ]; then
 
-            echo "❌ Gitleaks Secret Scan FAILED"
+            echo "❌ Gitleaks Secret Scan ERROR"
 
-            echo "Potential hardcoded secret(s) detected."
+            echo "Gitleaks was unable to complete the scan."
 
             FAIL=true
 
 
-          elif [ "$GITLEAKS_OUTCOME" = "success" ]; then
+          elif [ "$GITLEAKS_PASS" = "false" ]; then
+
+            echo "❌ Gitleaks Secret Scan FAILED"
+
+            echo "$GITLEAKS_FINDINGS potential secret(s) detected."
+
+            FAIL=true
+
+
+          elif [ "$GITLEAKS_PASS" = "true" ]; then
 
             echo "✅ Gitleaks Secret Scan PASSED"
+
+            echo "0 potential secrets detected."
 
 
           else
 
-            echo "⚠️ Gitleaks result: $GITLEAKS_OUTCOME"
+            echo "⚠️ Gitleaks result unknown."
+
+            FAIL=true
 
           fi
 
