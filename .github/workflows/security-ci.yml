@@ -85,6 +85,7 @@ jobs:
           set +e
 
           gitleaks git . \
+              --log-opts="-1 HEAD" \
             --report-format json \
             --report-path gitleaks-report.json \
             --redact
