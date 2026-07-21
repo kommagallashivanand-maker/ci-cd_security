@@ -885,7 +885,6 @@ jobs:
 
           fi
 
-
           # ===============================================================
           # GITLEAKS SECRET SCAN
           # ===============================================================
@@ -893,7 +892,6 @@ jobs:
           if [ "$GITLEAKS_SCAN_ERROR" = "true" ]; then
 
             echo "❌ Gitleaks Secret Scan ERROR"
-
             echo "Gitleaks was unable to complete the scan."
 
             FAIL=true
@@ -901,9 +899,230 @@ jobs:
 
           elif [ "$GITLEAKS_PASS" = "false" ]; then
 
-            echo "❌ Gitleaks Secret Scan FAILED"
+            echo ""
+            echo "========================================="
+            echo "❌ GITLEAKS SECRET SCAN FAILED"
+            echo "========================================="
 
             echo "$GITLEAKS_FINDINGS potential secret(s) detected."
+
+            echo ""
+            echo "Gitleaks Finding Details:"
+            echo "-----------------------------------------"
+
+
+            # -----------------------------------------------------------
+            # Read gitleaks-report.json and print safe finding details.
+            #
+            # Displays:
+            #   - File name
+            #   - Line number
+            #   - Variable/identifier when detectable
+            #   - Rule ID
+            #   - Description
+            #   - Commit
+            #   - Author
+            #
+            # Actual secret values are NEVER printed.
+            # -----------------------------------------------------------
+
+            python3 - <<'PY'
+
+import json
+import os
+import re
+
+report_file = "gitleaks-report.json"
+
+
+if not os.path.exists(report_file):
+
+    print("Gitleaks report file not found.")
+
+
+else:
+
+    try:
+
+        with open(
+            report_file,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
+            findings = json.load(file)
+
+
+        if not findings:
+
+            print(
+                "No Gitleaks finding details available."
+            )
+
+
+        else:
+
+            for number, finding in enumerate(
+                findings,
+                start=1
+            ):
+
+                # -----------------------------------------------
+                # Get basic finding information
+                # -----------------------------------------------
+
+                file_name = finding.get(
+                    "File",
+                    "Unknown"
+                )
+
+                start_line = finding.get(
+                    "StartLine",
+                    "Unknown"
+                )
+
+                end_line = finding.get(
+                    "EndLine",
+                    start_line
+                )
+
+                rule_id = finding.get(
+                    "RuleID",
+                    "Unknown"
+                )
+
+                description = finding.get(
+                    "Description",
+                    "Unknown"
+                )
+
+                commit = finding.get(
+                    "Commit",
+                    "Unknown"
+                )
+
+                author = finding.get(
+                    "Author",
+                    "Unknown"
+                )
+
+
+                # -----------------------------------------------
+                # Try to determine variable name
+                #
+                # Gitleaks does not always provide a dedicated
+                # variable-name field.
+                #
+                # Therefore we inspect the redacted Match field
+                # without printing its secret value.
+                # -----------------------------------------------
+
+                match = finding.get(
+                    "Match",
+                    ""
+                )
+
+                variable_name = "Not available"
+
+
+                if match:
+
+                    # Examples:
+                    #
+                    # API_KEY = REDACTED
+                    #
+                    # const API_KEY = REDACTED
+                    #
+                    # let secretToken = REDACTED
+                    #
+                    # AWS_SECRET_ACCESS_KEY: REDACTED
+
+                    variable_match = re.search(
+                        r'(?:const\s+|let\s+|var\s+)?'
+                        r'([A-Za-z_][A-Za-z0-9_]*)'
+                        r'\s*[:=]',
+                        match
+                    )
+
+
+                    if variable_match:
+
+                        variable_name = (
+                            variable_match.group(1)
+                        )
+
+
+                # -----------------------------------------------
+                # Print safe information
+                # -----------------------------------------------
+
+                print(
+                    f"Finding #{number}"
+                )
+
+                print(
+                    f"  File        : {file_name}"
+                )
+
+
+                if start_line == end_line:
+
+                    print(
+                        f"  Line        : {start_line}"
+                    )
+
+                else:
+
+                    print(
+                        f"  Lines       : "
+                        f"{start_line}-{end_line}"
+                    )
+
+
+                print(
+                    f"  Variable    : {variable_name}"
+                )
+
+                print(
+                    f"  Rule ID     : {rule_id}"
+                )
+
+                print(
+                    f"  Description : {description}"
+                )
+
+                print(
+                    f"  Commit      : {commit}"
+                )
+
+                print(
+                    f"  Author      : {author}"
+                )
+
+                print(
+                    "  Secret      : [REDACTED]"
+                )
+
+                print(
+                    "-----------------------------------------"
+                )
+
+
+    except Exception as error:
+
+        print(
+            "Unable to read Gitleaks report:"
+        )
+
+        print(error)
+
+
+PY
+
+
+            echo ""
+            echo "❌ Gitleaks security gate FAILED."
+            echo "Remove the exposed credential and rotate/revoke it if it was real."
 
             FAIL=true
 
@@ -924,6 +1143,9 @@ jobs:
           fi
 
 
+          echo ""
+          echo "========================================="
+          echo "          FINAL CI RESULT                "
           echo "========================================="
 
 
@@ -933,13 +1155,19 @@ jobs:
 
           if [ "$FAIL" = "true" ]; then
 
+            echo ""
             echo "Overall Status: ❌ FAIL"
+            echo ""
+            echo "One or more CI security/quality gates failed."
 
             exit 1
 
 
           else
 
+            echo ""
             echo "Overall Status: ✅ PASS"
+            echo ""
+            echo "All CI security/quality gates passed."
 
           fi
