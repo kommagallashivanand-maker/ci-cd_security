@@ -18,6 +18,11 @@ on:
   push:
     branches:
       - feature/DF_083_Quality_gates_in_CI
+      - staging
+
+  pull_request:
+    branches:
+      - staging
 
 permissions:
   contents: read
