@@ -348,16 +348,18 @@ jobs:
 
       - name: Install security and report dependencies
         run: |
-          # setuptools must be installed first in its own pip call.
-          # Semgrep's dependency opentelemetry-instrumentation imports
-          # pkg_resources (from setuptools) at module load time. If setuptools
-          # is resolved in the same pass as semgrep, the already-installed
-          # opentelemetry packages still reference the missing module.
-          python -m pip install --upgrade pip setuptools
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade setuptools wheel
+          python -m pip install --upgrade semgrep reportlab==4.2.5
 
-          python -m pip install \
-            semgrep==1.90.0 \
-            reportlab==4.2.5
+      - name: Verify Semgrep installation
+        run: |
+          python --version
+          python -m pip --version
+          python -m pip show setuptools
+          python -m pip show semgrep
+          python -c "import pkg_resources; print('pkg_resources OK')"
+          semgrep --version
 
 
       # =====================================================================
