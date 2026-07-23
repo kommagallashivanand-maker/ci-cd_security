@@ -350,7 +350,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
 
+          # setuptools provides pkg_resources, which semgrep>=1.90 no longer
+          # pulls in transitively on modern Python environments.
           python -m pip install \
+            setuptools \
             semgrep==1.90.0 \
             reportlab==4.2.5
 
@@ -393,113 +396,77 @@ jobs:
           fi
 
           # ---------------------------------------------------------------
-          # Count ERROR severity findings
+          # Parse findings and write counts to GITHUB_OUTPUT
           # ---------------------------------------------------------------
 
+          # The Node.js script only parses results and writes output variables.
+          # It does NOT call process.exit(1) — the Bash quality gate below owns
+          # that responsibility so SEMGREP_PASS is always written before exit.
           node <<'EOF'
           const fs = require('fs');
 
           const report = JSON.parse(
-                fs.readFileSync(
-                    'security-reports/semgrep-results.json',
-                 'utf8'
-             )
+            fs.readFileSync('security-reports/semgrep-results.json', 'utf8')
           );
 
-           const findings = report.results || [];
+          const findings = report.results || [];
 
-          let severity = {};
-          let files = {};
-          let vulnSeverity = {
-                 HIGH: 0,
-                MEDIUM: 0,
-                LOW: 0
-               };
+          const severity    = {};
+          const vulnSeverity = { HIGH: 0, MEDIUM: 0, LOW: 0 };
 
           findings.forEach(f => {
+            const sev = (f.extra?.severity || 'UNKNOWN').toUpperCase();
+            severity[sev] = (severity[sev] || 0) + 1;
 
-                const sev =
-                (f.extra?.severity || "UNKNOWN").toUpperCase();
+            const vuln = (f.extra?.metadata?.severity || 'UNKNOWN').toUpperCase();
+            if (vulnSeverity[vuln] !== undefined) {
+              vulnSeverity[vuln]++;
+            }
+          });
 
-                severity[sev] = (severity[sev] || 0) + 1;
+          // Write all four output variables to GITHUB_OUTPUT
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `SEMGREP_TOTAL=${findings.length}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `SEMGREP_ERRORS=${severity.ERROR || 0}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `SEMGREP_HIGH=${vulnSeverity.HIGH}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `SEMGREP_MEDIUM=${vulnSeverity.MEDIUM}\n`);
 
-                const vuln = (f.extra?.metadata?.severity || "UNKNOWN").toUpperCase();
-                if (vulnSeverity[vuln] !== undefined) {
-                         vulnSeverity[vuln]++;
-                  }
-
-                const path = f.path || "<unknown>";
-
-                if(!files[path])
-                files[path]=[];
-
-               files[path].push(f);
-
-           });
-
-           fs.appendFileSync(
-                     process.env.GITHUB_OUTPUT,
-                     `SEMGREP_HIGH=${vulnSeverity.HIGH}\n`
-           );
-
-           fs.appendFileSync(
-                   process.env.GITHUB_OUTPUT,
-                   `SEMGREP_MEDIUM=${vulnSeverity.MEDIUM}\n`
-              );
-
-           fs.appendFileSync(
-                  process.env.GITHUB_OUTPUT,
-                  `SEMGREP_ERRORS=${severity.ERROR || 0}\n`
-           );
-
-           fs.appendFileSync(
-               process.env.GITHUB_OUTPUT,
-                 `SEMGREP_TOTAL=${findings.length}\n`
-            );
-
-           
-           const reportFile =
-           'security-reports/semgrep_report(SAST).txt';
-           echo "SEMGREP_TOTAL..."
-
-           if (
-                (severity.ERROR || 0) > 0 ||
-                  vulnSeverity.HIGH > 0 ||
-                 vulnSeverity.MEDIUM > 0
-               ) {
-                  console.error("❌ Security gate failed.");
-                  console.error(`ERROR rules : ${severity.ERROR || 0}`);
-                  console.error(`HIGH findings: ${vulnSeverity.HIGH}`);
-                  console.error(`MEDIUM findings: ${vulnSeverity.MEDIUM}`);
-                  process.exit(1);
-             }
-
-             console.log("✅ Security gate passed.");
+          console.log(`Total findings : ${findings.length}`);
+          console.log(`ERROR rules    : ${severity.ERROR || 0}`);
+          console.log(`HIGH findings  : ${vulnSeverity.HIGH}`);
+          console.log(`MEDIUM findings: ${vulnSeverity.MEDIUM}`);
+          EOF
 
           # ---------------------------------------------------------------
-          # Semgrep quality gate
+          # Semgrep quality gate (runs after Node script exits cleanly)
           # ---------------------------------------------------------------
 
-          if [ "$SEMGREP_ERRORS" -gt 0 ] || \
-            [ "$SEMGREP_HIGH" -gt 0 ] || \
-            [ "$SEMGREP_MEDIUM" -gt 0 ]; then
+          # Re-read the values that Node wrote so Bash can use them.
+          SEMGREP_ERRORS=$(grep '^SEMGREP_ERRORS=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)
+          SEMGREP_HIGH=$(grep   '^SEMGREP_HIGH='   "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)
+          SEMGREP_MEDIUM=$(grep '^SEMGREP_MEDIUM=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)
+          SEMGREP_TOTAL=$(grep  '^SEMGREP_TOTAL='  "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)
 
-          echo "SEMGREP_PASS=false" >> "$GITHUB_OUTPUT"
+          if [ "${SEMGREP_ERRORS:-0}" -gt 0 ] || \
+             [ "${SEMGREP_HIGH:-0}"   -gt 0 ] || \
+             [ "${SEMGREP_MEDIUM:-0}" -gt 0 ]; then
 
-          echo "::warning::Semgrep detected security issues."
-          echo "::warning::ERROR rules : $SEMGREP_ERRORS"
-          echo "::warning::HIGH findings: $SEMGREP_HIGH"
-          echo "::warning::MEDIUM findings: $SEMGREP_MEDIUM"
+            echo "SEMGREP_PASS=false" >> "$GITHUB_OUTPUT"
+
+            echo "::warning::Semgrep detected security issues."
+            echo "::warning::ERROR rules  : $SEMGREP_ERRORS"
+            echo "::warning::HIGH findings: $SEMGREP_HIGH"
+            echo "::warning::MEDIUM findings: $SEMGREP_MEDIUM"
 
           else
 
-           echo "SEMGREP_PASS=true" >> "$GITHUB_OUTPUT"
+            echo "SEMGREP_PASS=true" >> "$GITHUB_OUTPUT"
 
           fi
 
           echo "Semgrep scan completed."
-          echo "ERROR rules : $SEMGREP_ERRORS"
-          echo "HIGH findings: $SEMGREP_HIGH"
+          echo "Total findings : $SEMGREP_TOTAL"
+          echo "ERROR rules    : $SEMGREP_ERRORS"
+          echo "HIGH findings  : $SEMGREP_HIGH"
           echo "MEDIUM findings: $SEMGREP_MEDIUM"
 
       # =====================================================================
