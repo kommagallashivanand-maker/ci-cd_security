@@ -365,82 +365,142 @@ jobs:
         run: |
           echo "Running Semgrep SAST scan..."
 
+          REPORTS_DIR="security-reports"
+          mkdir -p "$REPORTS_DIR"
+
+          set +e
+
           semgrep \
-            --config=p/javascript \
-            --config=p/react \
-            --json \
-            --output=semgrep-results.json \
-            --exclude=node_modules \
-            --exclude=dist \
-            . || true
+              --config=p/javascript \
+              --config=p/react \
+              --json \
+              --output="$REPORTS_DIR/semgrep-results.json" \
+              --exclude=node_modules \
+              --exclude=dist \
+              --exclude=.github \
+              --exclude="*.yml" \
+              --exclude="*.yaml" \
+              . 2>&1 | tee "$REPORTS_DIR/semgrep-output.log"
+
+          SEMGREP_EXIT=${PIPESTATUS[0]:-0}
+
+          echo "$SEMGREP_EXIT" > "$REPORTS_DIR/semgrep-exit.txt"
+
+          set -e
+
+          if [ ! -f "$REPORTS_DIR/semgrep-results.json" ]; then
+             echo '{"results":[]}' > "$REPORTS_DIR/semgrep-results.json"
+          fi
 
           # ---------------------------------------------------------------
           # Count ERROR severity findings
           # ---------------------------------------------------------------
 
-          SEMGREP_ERRORS=$(node -e "
-            try {
-              const report =
-                require('./semgrep-results.json');
+          node <<'EOF'
+          const fs = require('fs');
 
-              const findings =
-                report.results || [];
+          const report = JSON.parse(
+                fs.readFileSync(
+                    'security-reports/semgrep-results.json',
+                 'utf8'
+             )
+          );
 
-              const errors =
-                findings.filter(f =>
-                  (f.extra?.severity || '')
-                    .toUpperCase() === 'ERROR'
-                ).length;
+           const findings = report.results || [];
 
-              console.log(errors);
+          let severity = {};
+          let files = {};
+          let vulnSeverity = {
+                 HIGH: 0,
+                MEDIUM: 0,
+                LOW: 0
+               };
 
-            } catch(error) {
-              console.log(0);
-            }
-          ")
+          findings.forEach(f => {
 
-          # ---------------------------------------------------------------
-          # Count total findings
-          # ---------------------------------------------------------------
+                const sev =
+                (f.extra?.severity || "UNKNOWN").toUpperCase();
 
-          SEMGREP_TOTAL=$(node -e "
-            try {
-              const report =
-                require('./semgrep-results.json');
+                severity[sev] = (severity[sev] || 0) + 1;
 
-              console.log(
-                (report.results || []).length
+                const vuln = (f.extra?.metadata?.severity || "UNKNOWN").toUpperCase();
+                if (vulnSeverity[vuln] !== undefined) {
+                         vulnSeverity[vuln]++;
+                  }
+
+                const path = f.path || "<unknown>";
+
+                if(!files[path])
+                files[path]=[];
+
+               files[path].push(f);
+
+           });
+
+           fs.appendFileSync(
+                     process.env.GITHUB_OUTPUT,
+                     `SEMGREP_HIGH=${vulnSeverity.HIGH}\n`
+           );
+
+           fs.appendFileSync(
+                   process.env.GITHUB_OUTPUT,
+                   `SEMGREP_MEDIUM=${vulnSeverity.MEDIUM}\n`
               );
 
-            } catch(error) {
-              console.log(0);
-            }
-          ")
+           fs.appendFileSync(
+                  process.env.GITHUB_OUTPUT,
+                  `SEMGREP_ERRORS=${severity.ERROR || 0}\n`
+           );
 
-          echo "SEMGREP_TOTAL=$SEMGREP_TOTAL" >> "$GITHUB_OUTPUT"
+           fs.appendFileSync(
+               process.env.GITHUB_OUTPUT,
+                 `SEMGREP_TOTAL=${findings.length}\n`
+            );
 
-          echo "SEMGREP_ERRORS=$SEMGREP_ERRORS" >> "$GITHUB_OUTPUT"
+           
+           const reportFile =
+           'security-reports/semgrep_report(SAST).txt';
+           echo "SEMGREP_TOTAL..."
+
+           if (
+                (severity.ERROR || 0) > 0 ||
+                  vulnSeverity.HIGH > 0 ||
+                 vulnSeverity.MEDIUM > 0
+               ) {
+                  console.error("❌ Security gate failed.");
+                  console.error(`ERROR rules : ${severity.ERROR || 0}`);
+                  console.error(`HIGH findings: ${vulnSeverity.HIGH}`);
+                  console.error(`MEDIUM findings: ${vulnSeverity.MEDIUM}`);
+                  process.exit(1);
+             }
+
+             console.log("✅ Security gate passed.");
 
           # ---------------------------------------------------------------
           # Semgrep quality gate
           # ---------------------------------------------------------------
 
-          if [ "$SEMGREP_ERRORS" -gt 0 ]; then
+          if [ "$SEMGREP_ERRORS" -gt 0 ] || \
+            [ "$SEMGREP_HIGH" -gt 0 ] || \
+            [ "$SEMGREP_MEDIUM" -gt 0 ]; then
 
-            echo "SEMGREP_PASS=false" >> "$GITHUB_OUTPUT"
+          echo "SEMGREP_PASS=false" >> "$GITHUB_OUTPUT"
 
-            echo "::warning::Semgrep found $SEMGREP_ERRORS ERROR-level findings."
+          echo "::warning::Semgrep detected security issues."
+          echo "::warning::ERROR rules : $SEMGREP_ERRORS"
+          echo "::warning::HIGH findings: $SEMGREP_HIGH"
+          echo "::warning::MEDIUM findings: $SEMGREP_MEDIUM"
 
           else
 
-            echo "SEMGREP_PASS=true" >> "$GITHUB_OUTPUT"
+           echo "SEMGREP_PASS=true" >> "$GITHUB_OUTPUT"
 
           fi
 
           echo "Semgrep scan completed."
-          echo "Total findings: $SEMGREP_TOTAL"
-          echo "ERROR findings: $SEMGREP_ERRORS"
-
+          echo "ERROR rules : $SEMGREP_ERRORS"
+          echo "HIGH findings: $SEMGREP_HIGH"
+          echo "MEDIUM findings: $SEMGREP_MEDIUM"
 
       # =====================================================================
       # 13. GENERATE PDF SECURITY REPORT
@@ -471,6 +531,8 @@ jobs:
           # Semgrep
           SEMGREP_TOTAL: ${{ steps.semgrep.outputs.SEMGREP_TOTAL }}
           SEMGREP_ERRORS: ${{ steps.semgrep.outputs.SEMGREP_ERRORS }}
+          SEMGREP_HIGH: ${{ steps.semgrep.outputs.SEMGREP_HIGH }}
+          SEMGREP_MEDIUM: ${{ steps.semgrep.outputs.SEMGREP_MEDIUM }}
           SEMGREP_PASS: ${{ steps.semgrep.outputs.SEMGREP_PASS }}
 
           # Gitleaks
@@ -575,8 +637,11 @@ jobs:
           HIGH_CRITICAL: ${{ steps.npm_audit.outputs.HIGH_CRITICAL_COUNT }}
 
           # Semgrep
-          SEMGREP_PASS: ${{ steps.semgrep.outputs.SEMGREP_PASS }}
+          SEMGREP_TOTAL: ${{ steps.semgrep.outputs.SEMGREP_TOTAL }}
           SEMGREP_ERRORS: ${{ steps.semgrep.outputs.SEMGREP_ERRORS }}
+          SEMGREP_HIGH: ${{ steps.semgrep.outputs.SEMGREP_HIGH }}
+          SEMGREP_MEDIUM: ${{ steps.semgrep.outputs.SEMGREP_MEDIUM }}
+          SEMGREP_PASS: ${{ steps.semgrep.outputs.SEMGREP_PASS }}
 
           # Gitleaks
           GITLEAKS_PASS: ${{ steps.gitleaks.outputs.GITLEAKS_PASS }}
