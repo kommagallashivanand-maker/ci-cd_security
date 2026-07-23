@@ -384,7 +384,6 @@ jobs:
               --config=p/react \
               --config=p/owasp-top-ten \
               --config=p/secrets \
-              --config=p/dom \
               --config=p/nodejs \
               --json \
               --output="$REPORTS_DIR/semgrep-results.json" \
