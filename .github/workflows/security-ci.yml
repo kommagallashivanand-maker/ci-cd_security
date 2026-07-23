@@ -443,6 +443,26 @@ jobs:
           console.log(`ERROR rules    : ${severity.ERROR || 0}`);
           console.log(`HIGH findings  : ${vulnSeverity.HIGH}`);
           console.log(`MEDIUM findings: ${vulnSeverity.MEDIUM}`);
+
+          // Print file and line number for every finding
+          if (findings.length > 0) {
+            console.log('\n--- Semgrep Findings ---');
+            findings.forEach((f, i) => {
+              const file    = f.path || 'unknown';
+              const line    = f.start?.line || '?';
+              const endLine = f.end?.line || '?';
+              const rule    = f.check_id || 'unknown';
+              const sev     = (f.extra?.severity || 'UNKNOWN').toUpperCase();
+              const vuln    = (f.extra?.metadata?.severity || '').toUpperCase();
+              const msg     = f.extra?.message || '';
+
+              console.log(
+                `[${i + 1}] ${file}:${line}${line !== endLine ? '-' + endLine : ''} | ${sev}${vuln ? '/' + vuln : ''} | ${rule}`
+              );
+              console.log(`     ${msg}`);
+            });
+            console.log('------------------------\n');
+          }
           EOF
 
           # ---------------------------------------------------------------
